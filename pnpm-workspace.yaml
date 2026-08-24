@@ -28,6 +28,20 @@ overrides:
   brace-expansion@>=2.0.0 <2.1.4: ^2.1.4
   cookie@<0.7.0: ^0.7.0
   cross-spawn@<7.0.5: ^7.0.6
+  # GHSA-ggr8-5vv4-36mx (high) — stack exhaustion when merging recursive
+  # object graphs. Reached only through the wdio chain, which declares
+  # `deepmerge-ts: ^7.0.3` in @wdio/config, @wdio/utils and @wdio/runner and
+  # has not moved to 8.x, so Dependabot opens no PR and the floor has to come
+  # from here.
+  #
+  # devDependency only — `pnpm audit --prod` is clean, so no copy reaches the
+  # shipped Tauri binary — and the merged objects are our own wdio config and
+  # capabilities, never attacker input. The floor is still worth taking: 8.0.0
+  # is a real fix and nothing in the tree holds deepmerge-ts below it.
+  #
+  # Safe as an unscoped range: deepmerge-ts is not a direct dependency and the
+  # tree carries exactly one copy, so this cannot downgrade anything of ours.
+  deepmerge-ts@<8.0.0: ^8.0.0
   esbuild@<0.25.0: ^0.25.0
   # GHSA-5p4m-2wfm-xmqj widened the !!omap quadratic-CPU advisory to cover
   # 4.3.0, so the previous `<4.3.0: ^4.3.0` floor no longer clears it. 3.x is
