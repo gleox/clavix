@@ -165,8 +165,14 @@ jobs:
           prerelease: false
           args: ${{ matrix.tauri-target }}
 
+      # Only on failure, as the name says. tauri-action attaches every bundle
+      # to the Release itself, and Release assets are free storage — artifacts
+      # are not. Under `if: always()` this step re-uploaded the whole bundle
+      # set on every successful tag too: ~155 MB per release against the 0.5 GB
+      # Actions quota, for files already downloadable from the Release page.
+      # Two overlapping tags were enough to reach 90% of the quota.
       - name: Upload artifacts (fallback if release step fails)
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: clavix-${{ matrix.artifact-name }}
@@ -181,7 +187,9 @@ jobs:
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
           if-no-files-found: warn
-          retention-days: 14
+          # Short on purpose: this is a rescue copy to grab by hand right after
+          # a failed publication, not an archive.
+          retention-days: 7
 
   # Posts a release notification to a Discord channel after every
   # platform-build job has succeeded. Silently no-ops when the secret
