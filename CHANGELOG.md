@@ -5,6 +5,43 @@ All notable changes to Clavix are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2](https://github.com/Upellift99/clavix/compare/v0.19.1...v0.19.2) (2026-08-24)
+
+A dependency release. Nothing here changes what the application does —
+no IPC, storage or vault format changes — so 0.19.2 behaves exactly like
+0.19.1 in daily use.
+
+**It does carry a security fix, but a small one.** `h2`, the HTTP/2
+implementation underneath `reqwest`, moves 0.4.15 to 0.4.18 for
+[RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258):
+before 0.4.16 it accepted and queued empty DATA frames without limit, so
+a peer sending them continuously could push memory up without bound, or
+trip a panic if the length overflowed. RustSec rates it low, and the
+shape of the bug matters here — Clavix is an HTTP/2 *client*, so the only
+peer that can send it those frames is the Vaultwarden server you pointed
+it at. Reaching it needs a hostile or compromised server, not a passing
+attacker on the network. Worth taking on your next update; not worth an
+emergency pull.
+
+The other advisory in this release is **not** a reason to redeploy, and
+is named only so it does not resurface as a surprise. `deepmerge-ts`
+gains a floor of 8.0.0 for GHSA-ggr8-5vv4-36mx, a stack exhaustion when
+merging recursive object graphs. It is a devDependency of the WebdriverIO
+test runner: `pnpm audit --prod` is clean before and after, no copy has
+ever been inside the shipped binary, and the objects being merged are our
+own test configuration. Nothing that runs on your machine was affected.
+
+Both advisories were published after 0.19.1 was tagged, so the two audit
+gates went red on `master` without a commit to cause it — which had the
+side effect of blocking every open dependency PR until the fix landed.
+
+The rest is the usual tree refresh, none of it user-visible: Svelte
+5.56.10 and SvelteKit 2.70.3, Paraglide 2.24.1, WebdriverIO 9.31.2, Vite
+8.2.2, Vitest 4.1.11, and `taiki-e/install-action` 2.86.5 in CI. The wdio
+bump drops `puppeteer-core` from the tree entirely. Both advisory
+suppressions in `pnpm-workspace.yaml` were re-checked against the result
+rather than assumed still valid, and both are still load-bearing.
+
 ## [0.19.1](https://github.com/Upellift99/clavix/compare/v0.19.0...v0.19.1) (2026-08-17)
 
 A maintenance release: nothing here changes what the application does.
