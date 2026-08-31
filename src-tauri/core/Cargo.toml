@@ -29,7 +29,7 @@ url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "multipart"] }
 pbkdf2 = "0.12"
 sha2 = "0.10"
-argon2 = "0.5"
+argon2 = "0.6"
 # 0.23 turned on SIMD engines by default, which flips the crate from
 # `forbid(unsafe_code)` to `deny` and compiles hand-written AVX2/NEON
 # intrinsics into a binary that handles vault keys. We only ever use the
