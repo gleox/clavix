@@ -767,6 +767,34 @@ mod tests {
         assert_eq!(mph.as_str(), "0FMeontUyfpu9Ga/DvERL9LMAXg9KB82VK6UqHdnKko=");
     }
 
+    // The Argon2id counterpart of the vector above, computed with the
+    // reference C implementation (`argon2-cffi`'s `hash_secret_raw`), not
+    // with this crate. It is what stops a major bump of `argon2` from
+    // silently changing what we derive: every parameter-validation test
+    // below still passes if the output bytes move, and a moved output
+    // means every existing Argon2id vault stops unlocking.
+    #[test]
+    fn derive_master_key_matches_independent_argon2id_known_answer() {
+        let pwd: SecretString = "correct horse battery staple".to_string().into();
+        // Same mixed-case, untrimmed email as the PBKDF2 vector: the salt is
+        // SHA-256 of the *normalised* address, so this pins the normalisation
+        // and the digest-as-salt rule at the same time.
+        let mk = derive_master_key(
+            &pwd,
+            "User@Example.COM",
+            KdfType::Argon2id,
+            3,
+            Some(16),
+            Some(2),
+        )
+        .unwrap();
+        let got_hex: String = mk.0.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            got_hex,
+            "3b8af27eff0eee164d9d4be6313a684cafb14f646af4cad056c51ff0d7155dc9"
+        );
+    }
+
     #[test]
     fn derive_master_key_rejects_pbkdf2_below_the_floor() {
         // A hostile/MITM server returning a tiny iteration count must be
