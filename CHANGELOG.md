@@ -5,6 +5,55 @@ All notable changes to Clavix are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.3](https://github.com/Upellift99/clavix/compare/v0.19.2...v0.19.3) (2026-08-31)
+
+A maintenance release. Nothing here changes what the application does —
+no IPC, storage or vault format changes — so 0.19.3 behaves exactly like
+0.19.2 in daily use.
+
+**Unlike 0.19.2, it carries no security fix at all.** Not one of the
+updates below closes an advisory: `cargo audit` and `pnpm audit` report
+exactly what they reported before, down to the same single ignored
+`extract-zip` entry. If you update by pulling manually, this one can
+wait for whenever you were going to update anyway.
+
+What prompted it was housekeeping. `chacha20` 0.10.1 was yanked upstream
+on 2026-08-27, which tripped the yanked-crates gate on `master` and on
+all eight open dependency PRs at the same moment — the same shape of
+breakage as 0.19.2's advisories, a red gate with no commit to cause it.
+0.10.2 is the published successor and reaches Clavix through `keepass`
+and `rand`, so the fix is a lockfile bump. The bug upstream is a
+correctness one, not a cryptographic one: the SSE2 backend of the RNG and
+64-bit-counter variants emitted an SSE4.1 instruction, so a CPU with SSE2
+but without SSE4.1 would take an illegal instruction. That is pre-2008
+x86_64, and only where the AVX2 backend is not selected. Nothing was at
+risk — a yanked crate simply has no business sitting in the lockfile.
+
+The rest is the usual tree refresh, batched rather than merged one PR at
+a time. On the Rust side `argon2` 0.5.3 to 0.6.0, `uuid` 1.24.1 to
+1.26.0, `keepass` 0.13.21 to 0.13.25 and `rand` 0.8.7 to 0.8.8; on the
+Node side Paraglide 2.25.0, `@types/node` 26.4.0 and the WebdriverIO pair
+at 9.31.5, all build- or test-time only and none of them inside the
+shipped binary. CI moves `taiki-e/install-action` to 2.87.0, and release
+builds stop being uploaded twice — once to the Release and once as a
+workflow artifact — which was quietly eating the artifact storage quota.
+
+One change deserves naming, because from the outside it looks like
+nothing. `argon2` is a major bump, and it sits on the path that derives
+your master key from your password. It compiled clean and passed the
+whole test suite — which proved nothing, because until this release
+there was **no known-answer test on the Argon2id path at all**, only
+checks that weak KDF parameters get refused. A dependency that quietly
+changed what the KDF produces would have made every existing Argon2id
+vault undecryptable, with the build fully green and nothing to warn us.
+
+So a vector computed with the reference C implementation went in ahead of
+the bump, pinning the parts that are ours rather than the crate's: the
+SHA-256-of-normalised-email salt, the trim and lower-casing that feeds
+it, and the 32-byte output. The derived bytes are identical on 0.5.3 and
+on 0.6.0. Your vault unlocks exactly as it did — and from now on that is
+something the test suite will notice rather than something we hope for.
+
 ## [0.19.2](https://github.com/Upellift99/clavix/compare/v0.19.1...v0.19.2) (2026-08-24)
 
 A dependency release. Nothing here changes what the application does —
