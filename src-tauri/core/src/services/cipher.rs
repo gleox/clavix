@@ -4,7 +4,8 @@ use crate::crypto::{
 };
 use crate::error::{Error, Result};
 use crate::models::{
-    CardInput, Cipher, CipherCreateInput, CustomFieldInput, IdentityInput, LoginInput, SshKeyInput,
+    CardInput, Cipher, CipherCreateInput, CipherType, CustomFieldInput, IdentityInput, LoginInput,
+    SshKeyInput,
 };
 use std::collections::HashMap;
 
@@ -539,22 +540,59 @@ pub fn build_share_cipher_body(
         })
         .transpose()?;
 
+    let mut cipher_json = serde_json::json!({
+        "type": cipher.kind as u8,
+        "key": rewrapped_key,
+        "name": name,
+        "notes": notes,
+        "organizationId": target_org_id,
+        "folderId": serde_json::Value::Null,
+        "favorite": cipher.favorite,
+        // The share PUT has replace semantics and the server clears any
+        // field the body omits, so an absent `reprompt` silently turned off
+        // master-password reprompt on every shared item. Absent means 0.
+        "reprompt": cipher.reprompt.unwrap_or(0),
+        "login": login_json,
+        "card": card_json,
+        "identity": identity_json,
+        "sshKey": ssh_key_json,
+        "fields": fields_json,
+        "passwordHistory": password_history_json,
+    });
+
+    // The server keys the stored data blob off `type` and rejects the whole
+    // PUT with "Data missing" when the matching sub-object is absent. A
+    // SecureNote has no encrypted sub-object of its own — its payload lives
+    // in `notes` — so nothing above ever produces one, and sharing a note
+    // used to fail with an opaque 400. Synthesise the marker Bitwarden
+    // expects, exactly as `build_cipher_body` does on create.
+    let obj = cipher_json.as_object_mut().expect("json! returned a map");
+    let type_key = match cipher.kind {
+        CipherType::Login => "login",
+        CipherType::SecureNote => {
+            obj.insert("secureNote".into(), serde_json::json!({ "type": 0 }));
+            "secureNote"
+        }
+        CipherType::Card => "card",
+        CipherType::Identity => "identity",
+        CipherType::SshKey => "sshKey",
+    };
+
+    // Guard every other type the same way. A cipher whose declared type has
+    // no matching sub-object would hit that same opaque server-side 400,
+    // but only after we re-encrypted the whole item; failing here names the
+    // culprit instead.
+    if !matches!(obj.get(type_key), Some(v) if !v.is_null()) {
+        return Err(Error::Storage {
+            reason: format!(
+                "cannot share cipher {}: declared type {} carries no '{type_key}' data",
+                cipher.id, cipher.kind as u8
+            ),
+        });
+    }
+
     Ok(serde_json::json!({
-        "cipher": {
-            "type": cipher.kind as u8,
-            "key": rewrapped_key,
-            "name": name,
-            "notes": notes,
-            "organizationId": target_org_id,
-            "folderId": serde_json::Value::Null,
-            "favorite": cipher.favorite,
-            "login": login_json,
-            "card": card_json,
-            "identity": identity_json,
-            "sshKey": ssh_key_json,
-            "fields": fields_json,
-            "passwordHistory": password_history_json,
-        },
+        "cipher": cipher_json,
         "collectionIds": collection_ids,
     }))
 }
@@ -599,10 +637,17 @@ mod tests {
             revision_date: None,
             deleted_date: None,
             favorite: false,
-            login: None,
-            card: None,
-            identity: None,
-            ssh_key: None,
+            // A cipher always carries the sub-object matching its type;
+            // the server rejects the share PUT outright without it. Every
+            // field on these is `#[serde(default)]`, so an empty object
+            // yields an all-None instance. SecureNote has no sub-object of
+            // its own — its payload is `notes`.
+            login: matches!(kind, CipherType::Login).then(|| serde_json::from_str("{}").unwrap()),
+            card: matches!(kind, CipherType::Card).then(|| serde_json::from_str("{}").unwrap()),
+            identity: matches!(kind, CipherType::Identity)
+                .then(|| serde_json::from_str("{}").unwrap()),
+            ssh_key: matches!(kind, CipherType::SshKey)
+                .then(|| serde_json::from_str("{}").unwrap()),
             fields: None,
             password_history: None,
             reprompt: None,
@@ -1045,6 +1090,90 @@ mod tests {
         assert!(c["identity"].is_null());
         assert!(c["sshKey"].is_null());
         assert!(c["notes"].is_null());
+    }
+
+    #[test]
+    fn share_body_preserves_reprompt() {
+        // Regression: `reprompt` was omitted entirely, and the server treats
+        // an omitted field as "clear it" — so sharing an item quietly
+        // dropped its master-password reprompt flag.
+        let source = test_key();
+        let target = other_test_key();
+        let mut cipher = base_cipher(CipherType::Login, &source);
+        cipher.reprompt = Some(1);
+
+        let body = build_share_cipher_body(&cipher, &source, &target, "org", &[]).unwrap();
+        assert_eq!(body["cipher"]["reprompt"], 1);
+    }
+
+    #[test]
+    fn share_body_defaults_reprompt_to_zero_when_absent() {
+        let source = test_key();
+        let target = other_test_key();
+        let cipher = base_cipher(CipherType::Login, &source); // reprompt: None
+
+        let body = build_share_cipher_body(&cipher, &source, &target, "org", &[]).unwrap();
+        assert_eq!(body["cipher"]["reprompt"], 0);
+    }
+
+    #[test]
+    fn share_body_carries_secure_note_marker() {
+        // Regression: the body used to declare `type: 2` while emitting no
+        // `secureNote` sub-object at all. The server keys its stored data
+        // blob off `type` and answered "Data missing" with a bare 400, so
+        // moving a note into a shared collection simply never worked.
+        let source = test_key();
+        let target = other_test_key();
+        let mut cipher = base_cipher(CipherType::SecureNote, &source);
+        cipher.notes = Some(encrypt_string("recovery codes", &source).unwrap());
+
+        let body = build_share_cipher_body(&cipher, &source, &target, "org", &[]).unwrap();
+        let c = &body["cipher"];
+
+        assert_eq!(c["type"], 2);
+        assert_eq!(c["secureNote"]["type"], 0);
+        // The note body itself must survive, rewrapped under the org key.
+        assert_eq!(
+            decrypt_name(c["notes"].as_str().unwrap(), &target).unwrap(),
+            "recovery codes"
+        );
+    }
+
+    #[test]
+    fn share_body_errors_when_declared_type_has_no_data() {
+        // Every non-note type must carry its sub-object. Without the guard
+        // this produced the same opaque server-side 400, but only after the
+        // whole item had been re-encrypted.
+        let source = test_key();
+        let target = other_test_key();
+        let mut cipher = base_cipher(CipherType::Login, &source);
+        cipher.login = None; // the shape the server would reject
+
+        let err = build_share_cipher_body(&cipher, &source, &target, "org", &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("login"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn share_body_emits_type_data_for_every_type() {
+        // Guards against a new CipherType arriving without its key mapping.
+        let source = test_key();
+        let target = other_test_key();
+        for (kind, key) in [
+            (CipherType::Login, "login"),
+            (CipherType::SecureNote, "secureNote"),
+            (CipherType::Card, "card"),
+            (CipherType::Identity, "identity"),
+            (CipherType::SshKey, "sshKey"),
+        ] {
+            let cipher = base_cipher(kind, &source);
+            let body = build_share_cipher_body(&cipher, &source, &target, "org", &[])
+                .unwrap_or_else(|e| panic!("{kind:?} failed to build: {e}"));
+            assert!(
+                !body["cipher"][key].is_null(),
+                "{kind:?} produced a null '{key}'"
+            );
+        }
     }
 
     #[test]
