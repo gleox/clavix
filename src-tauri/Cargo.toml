@@ -9,7 +9,7 @@ members = ["core"]
 
 [package]
 name = "clavix"
-version = "0.19.3"
+version = "0.19.4"
 description = "Client desktop moderne pour Vaultwarden/Bitwarden"
 authors = ["Clavix Labs"]
 license = "GPL-3.0-or-later"

@@ -5,6 +5,13 @@ All notable changes to Clavix are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.4](https://github.com/Upellift99/clavix/compare/v0.19.3...v0.19.4) (2026-09-02)
+
+
+### Bug Fixes
+
+* **share:** send secureNote and preserve reprompt when sharing an item ([#298](https://github.com/Upellift99/clavix/issues/298)) ([a989844](https://github.com/Upellift99/clavix/commit/a9898440aa78422138c7552ff5a0c1218f6727f0))
+
 ## [0.19.3](https://github.com/Upellift99/clavix/compare/v0.19.2...v0.19.3) (2026-08-31)
 
 A maintenance release. Nothing here changes what the application does —
