@@ -1,6 +1,6 @@
 {
   "name": "clavix",
-  "version": "0.19.4",
+  "version": "0.20.0",
   "description": "Client desktop moderne pour Vaultwarden/Bitwarden",
   "type": "module",
   "packageManager": "pnpm@11.21.0",

@@ -5,6 +5,18 @@ All notable changes to Clavix are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0](https://github.com/Upellift99/clavix/compare/v0.19.4...v0.20.0) (2026-09-09)
+
+
+### Features
+
+* **auth:** add language switch to the pre-login screens ([#305](https://github.com/Upellift99/clavix/issues/305)) ([b4e32e6](https://github.com/Upellift99/clavix/commit/b4e32e6b751a2af65373eb0de369005cbab2d276))
+
+
+### Bug Fixes
+
+* **deps:** clear the two advisories that turned the audit gate red ([#307](https://github.com/Upellift99/clavix/issues/307)) ([2b37709](https://github.com/Upellift99/clavix/commit/2b377095400335b5f5c5350574adce148487b364))
+
 ## [0.19.4](https://github.com/Upellift99/clavix/compare/v0.19.3...v0.19.4) (2026-09-02)
 
 
