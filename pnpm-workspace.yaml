@@ -46,7 +46,14 @@ overrides:
   # GHSA-5p4m-2wfm-xmqj widened the !!omap quadratic-CPU advisory to cover
   # 4.3.0, so the previous `<4.3.0: ^4.3.0` floor no longer clears it. 3.x is
   # still swept up to 4.x on purpose: the fix was never backported there.
-  js-yaml@<4.3.1: ^4.3.1
+  #
+  # Widened a second time by GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not
+  # limit CPU use for empty merge sources), which covers <4.3.2 and so swept
+  # up the 4.3.1 this floor used to pin. Same shape as the previous widening:
+  # the range still admitted the fix, but the lockfile sat on the now-covered
+  # version. Raising the floor is what moves it. Reached through
+  # @wdio/mocha-framework > mocha > js-yaml.
+  js-yaml@<4.3.2: ^4.3.2
   kysely@<0.28.17: ^0.28.17
   minimatch@<3.1.3: ^3.1.3
   # GHSA-2v37-7h3g-55p8, reached only through vite > postcss at build time.
@@ -98,6 +105,21 @@ auditConfig:
     # Drop this entry the day @wdio/utils stops pulling @puppeteer/browsers,
     # or extract-zip ships a real fix. Re-check with `pnpm why extract-zip`.
     - GHSA-jmr9-qjv8-65gv
+
+    # GHSA-7pqw-9j4j-h8q3 (high) — "arbitrary file writes through symlink
+    # archive entries". The same unvalidated-symlink flaw as the entry above,
+    # re-issued under its own GHSA rather than folded into it, so it has to be
+    # ignored separately or the gate stays red on a finding we already ruled
+    # on.
+    #
+    # Every line of the reasoning above still holds, re-verified rather than
+    # assumed: extract-zip's newest published version is still 2.0.1, the
+    # advisory carries `first_patched_version: null` (the ">=2.0.2" under
+    # "Patched versions" is again a placeholder for a release that does not
+    # exist), `pnpm why extract-zip` still lands every path on puppeteer-core,
+    # and tests/e2e/wdio.conf.mjs still declares no `services`, so wdio never
+    # fetches or unpacks a browser. `pnpm audit --prod` remains clean.
+    - GHSA-7pqw-9j4j-h8q3
 
 # pnpm 11 turned "ignored build scripts" from a warning into a hard install
 # error, so the answer has to be recorded explicitly or `pnpm install
