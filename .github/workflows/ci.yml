@@ -143,6 +143,74 @@ jobs:
         working-directory: .
         run: ./scripts/check-yanked-crates.sh
 
+  # Windows and macOS were a blind spot: every job above runs on
+  # ubuntu-24.04, so anything behind `#[cfg(windows)]` or
+  # `cfg(target_os = "macos")` was never compiled, never linted and never
+  # tested here. A green CI said nothing about it.
+  #
+  # What that cost, concretely (see #311): PR #306 added ~1400 lines of
+  # Windows-gated SSH agent code plus 19 Windows-only tests. CI could not
+  # corroborate any of it, so review fell back to reading Win32 docs by
+  # hand. The mirror image bit at the same time — the PR failed to compile
+  # on *Unix* (`Arc` left out of scope by a module split), which its author
+  # could not see either, because `mod unix` is not compiled on Windows.
+  # Neither side's testing could see the other's half.
+  #
+  # Scope is deliberately compile + lint + test, not the E2E matrix: it
+  # covers most of the risk for a fraction of the wall clock, and the
+  # runners are free on a public repo.
+  #
+  # fmt and audit are absent on purpose — both are platform-independent and
+  # already enforced by the ubuntu job; running them three times would only
+  # buy three identical answers.
+  #
+  # NOT in .github/required-checks.txt yet, deliberately. Making a check
+  # required before it has ever run on real code — on a branch with
+  # enforce_admins on — is how you wedge every open PR at once. Land it
+  # informational, watch it, then promote it and re-apply protection in a
+  # follow-up, as that file's header describes.
+  rust-cross:
+    name: Rust cross (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both platforms even when one fails: a Windows-only break
+      # should not hide a macOS-only one on the same push.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    # Generous while the cache is cold and we have no warm-cache norm to
+    # go on; the ubuntu job needs 25 and Windows link times are worse.
+    # Tighten once a few runs have landed.
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # No system-dependency step: windows-latest ships the WebView2 SDK
+      # and the MSVC toolchain, macos-latest ships the Xcode command line
+      # tools. The apt block in the ubuntu job has no equivalent here.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo clippy (strict)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # `--tests`, not `--lib`: the ubuntu job already learned that `--lib`
+      # leaves the integration suite under src-tauri/tests/ silently
+      # uncovered. Same reasoning applies per-platform.
+      - name: cargo test (lib + integration)
+        run: cargo test --tests --locked
+
   frontend:
     name: Frontend (svelte-check)
     runs-on: ubuntu-24.04
