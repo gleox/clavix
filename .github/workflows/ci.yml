@@ -35,6 +35,21 @@ jobs:
       - name: Install Tauri system dependencies
         working-directory: .
         run: |
+          # The runner image ships third-party apt sources we never use.
+          # Google's chrome-stable repo intermittently serves a Packages.gz
+          # whose hash does not match its Release file; `apt-get update` then
+          # fails wholesale and takes every ubuntu job down at once, with
+          # nothing of ours involved. Seen on master 2026-09-09 (run
+          # 34385166551, all three ubuntu jobs red on this step while the
+          # windows/macos jobs — which have no apt step — passed), and
+          # earlier the same day as a 25-minute hang on the same step in
+          # #312. Retrying does not help: the file is consistently bad, not
+          # flaky.
+          #
+          # Safe to drop: every package installed below lives in Ubuntu's own
+          # archive. The E2E jobs drive WebKitWebDriver (webkit2gtk-driver),
+          # never Chrome.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
@@ -314,6 +329,21 @@ jobs:
 
       - name: Install Tauri + WebDriver system dependencies
         run: |
+          # The runner image ships third-party apt sources we never use.
+          # Google's chrome-stable repo intermittently serves a Packages.gz
+          # whose hash does not match its Release file; `apt-get update` then
+          # fails wholesale and takes every ubuntu job down at once, with
+          # nothing of ours involved. Seen on master 2026-09-09 (run
+          # 34385166551, all three ubuntu jobs red on this step while the
+          # windows/macos jobs — which have no apt step — passed), and
+          # earlier the same day as a 25-minute hang on the same step in
+          # #312. Retrying does not help: the file is consistently bad, not
+          # flaky.
+          #
+          # Safe to drop: every package installed below lives in Ubuntu's own
+          # archive. The E2E jobs drive WebKitWebDriver (webkit2gtk-driver),
+          # never Chrome.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
@@ -397,6 +427,21 @@ jobs:
 
       - name: Install Tauri + WebDriver system dependencies
         run: |
+          # The runner image ships third-party apt sources we never use.
+          # Google's chrome-stable repo intermittently serves a Packages.gz
+          # whose hash does not match its Release file; `apt-get update` then
+          # fails wholesale and takes every ubuntu job down at once, with
+          # nothing of ours involved. Seen on master 2026-09-09 (run
+          # 34385166551, all three ubuntu jobs red on this step while the
+          # windows/macos jobs — which have no apt step — passed), and
+          # earlier the same day as a 25-minute hang on the same step in
+          # #312. Retrying does not help: the file is consistently bad, not
+          # flaky.
+          #
+          # Safe to drop: every package installed below lives in Ubuntu's own
+          # archive. The E2E jobs drive WebKitWebDriver (webkit2gtk-driver),
+          # never Chrome.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
