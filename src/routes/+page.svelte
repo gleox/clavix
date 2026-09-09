@@ -628,10 +628,20 @@
   {#key prefs.currentLocale}
     {#if auth.phase !== "loggedIn"}
       <div class="auth-screen">
-        <AuthGate {auth} onOnboardingComplete={completeOnboarding} />
+        <AuthGate
+          {auth}
+          onOnboardingComplete={completeOnboarding}
+          currentLocale={prefs.currentLocale}
+          onApplyLocale={(loc) => prefs.applyLocale(loc, { reload: true })}
+        />
       </div>
     {:else}
-      <AuthGate {auth} onOnboardingComplete={completeOnboarding} />
+      <AuthGate
+        {auth}
+        onOnboardingComplete={completeOnboarding}
+        currentLocale={prefs.currentLocale}
+        onApplyLocale={(loc) => prefs.applyLocale(loc, { reload: true })}
+      />
     {/if}
 
     {#if auth.phase === "loggedIn"}

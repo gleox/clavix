@@ -8,13 +8,24 @@
   import UnlockForm from "./UnlockForm.svelte";
   import StandaloneOpenForm from "./StandaloneOpenForm.svelte";
   import type { AuthController } from "./auth.svelte";
+  import type { Locale } from "./types";
 
   type Props = {
     auth: AuthController;
     onOnboardingComplete: () => void;
+    currentLocale: Locale;
+    onApplyLocale: (loc: Locale) => void;
   };
 
-  let { auth, onOnboardingComplete }: Props = $props();
+  let { auth, onOnboardingComplete, currentLocale, onApplyLocale }: Props = $props();
+
+  // Endonym ("self-named") language labels so the control reads the same
+  // in every locale — no message keys required. Order mirrors the
+  // preferences dialog (base locale first).
+  const LANGUAGES: { code: Locale; label: string }[] = [
+    { code: "fr", label: "Français" },
+    { code: "en", label: "English" },
+  ];
 
   // Build version for the startup footer. Offline, straight from Rust.
   // A failure just leaves the version off — the link still works.
@@ -94,6 +105,22 @@
     <button type="button" class="auth-footer-link" onclick={openWebsite} title={m.about_website()}>
       clavix.org
     </button>
+    <!-- Language switch: the vault preference lives behind the lock, so
+         the pre-login screens carry their own. -->
+    <span class="auth-footer-sep" aria-hidden="true">·</span>
+    <span class="auth-footer-langs" role="group" aria-label={m.settings_language()}>
+      {#each LANGUAGES as lang (lang.code)}
+        <button
+          type="button"
+          class="auth-lang"
+          class:active={lang.code === currentLocale}
+          aria-pressed={lang.code === currentLocale}
+          onclick={() => onApplyLocale(lang.code)}
+        >
+          {lang.label}
+        </button>
+      {/each}
+    </span>
   </footer>
 {/if}
 
@@ -126,6 +153,34 @@
     color: #1d4ed8;
   }
 
+  .auth-footer-langs {
+    display: inline-flex;
+    gap: 0.35rem;
+  }
+
+  /* Ghost buttons: quiet by default, link-coloured on hover, and the
+     active language reads as solid text so the two never compete with
+     the clavix.org link for "clickable" affordance. */
+  .auth-lang {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .auth-lang:hover:not(.active) {
+    color: #2563eb;
+    text-decoration: underline;
+  }
+
+  .auth-lang.active {
+    color: #333;
+    font-weight: 600;
+    cursor: default;
+  }
+
   @media (prefers-color-scheme: dark) {
     .auth-footer {
       color: #999;
@@ -135,6 +190,12 @@
     }
     .auth-footer-link:hover {
       color: #93c5fd;
+    }
+    .auth-lang:hover:not(.active) {
+      color: #60a5fa;
+    }
+    .auth-lang.active {
+      color: #e6e6e6;
     }
   }
 
@@ -146,5 +207,11 @@
   }
   :global(:root.force-dark) .auth-footer-link:hover {
     color: #93c5fd;
+  }
+  :global(:root.force-dark) .auth-lang:hover:not(.active) {
+    color: #60a5fa;
+  }
+  :global(:root.force-dark) .auth-lang.active {
+    color: #e6e6e6;
   }
 </style>
