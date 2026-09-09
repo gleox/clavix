@@ -168,6 +168,18 @@ pub struct SshAgentStatus {
     pub skipped: Vec<SkippedKey>,
 }
 
+/// Deny every pending signature confirmation: send `false` down each
+/// parked oneshot. Call before stopping the agent so a confirmation the
+/// user can no longer see (the prompt is gone, the dialog is closing)
+/// does not keep a serve task — or the Pageant window thread — parked
+/// for the full 30-second confirm timeout.
+fn deny_pending_confirmations(state: &AppState) {
+    let pending = std::mem::take(&mut *state.ssh_confirms.lock());
+    for (_, tx) in pending {
+        let _ = tx.send(false);
+    }
+}
+
 #[tauri::command]
 pub async fn start_ssh_agent(
     state: State<'_, AppState>,
@@ -180,6 +192,7 @@ pub async fn start_ssh_agent(
         slot.take()
     };
     if let Some(h) = previous {
+        deny_pending_confirmations(&state);
         h.stop().await;
     }
 
@@ -303,6 +316,7 @@ pub async fn stop_ssh_agent(state: State<'_, AppState>) -> Result<()> {
         slot.take()
     };
     if let Some(h) = handle {
+        deny_pending_confirmations(&state);
         h.stop().await;
     }
     // The skip list describes a load that no longer has a running agent

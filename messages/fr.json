@@ -109,6 +109,7 @@
   "ssh_agent_env_other": "Clavix a été lancé avec SSH_AUTH_SOCK sur {current}. Cela ne dit rien de vos terminaux : cette variable est figée au démarrage de Clavix, et n'est relue qu'à l'ouverture de session. Si vous venez de l'ajouter à ~/.profile, reconnectez-vous.",
   "ssh_agent_env_verify_hint": "Pour savoir si ça marche vraiment, lancez ceci dans le terminal d'où vous utilisez ssh — si vos clés s'affichent, tout va bien, quoi qu'indique ce message :",
   "ssh_agent_env_unset": "Clavix a été lancé sans SSH_AUTH_SOCK. Cela ne dit rien de vos terminaux : cette variable est figée au démarrage de Clavix. Ajoutez la ligne ci-dessus à ~/.profile puis reconnectez-vous.",
+  "ssh_agent_env_windows_hint": "OpenSSH sous Windows (ssh.exe, git, ssh-add) détecte automatiquement l'agent sur ce pipe — rien à configurer ni à exporter. Pour vérifier que ça marche, lancez ceci dans un terminal :",
   "settings_ssh_confirm": "Confirmation avant signature",
   "settings_ssh_confirm_never": "Jamais (signer directement)",
   "settings_ssh_confirm_session": "Une fois par clé et par session",

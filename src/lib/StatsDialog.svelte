@@ -70,6 +70,12 @@
     onCopyShellCommand,
   }: Props = $props();
 
+  // The SSH_AUTH_SOCK guidance below is Unix-only: Windows OpenSSH
+  // (ssh.exe, ssh-add, git-for-windows) finds the agent by probing the
+  // \\.\pipe\openssh-ssh-agent named pipe, with no environment variable
+  // involved. Same technique as prefs.svelte.ts's IS_LINUX.
+  const IS_WINDOWS = /Windows/i.test(navigator.userAgent);
+
   let dialog = $state<HTMLDialogElement | null>(null);
   let sshAgent = $state<SshAgentStatus>({
     running: false,
@@ -440,31 +446,22 @@
     {#if sshAgent.running && sshAgent.socketPath}
       <div class="ssh-agent-sock">
         <code>{sshAgent.socketPath}</code>
-        <button
-          type="button"
-          class="secondary small"
-          onclick={() => onCopySocketPath(sshAgent.socketPath!)}
-        >
-          {m.ssh_agent_copy_export()}
-        </button>
+        {#if !IS_WINDOWS}
+          <button
+            type="button"
+            class="secondary small"
+            onclick={() => onCopySocketPath(sshAgent.socketPath!)}
+          >
+            {m.ssh_agent_copy_export()}
+          </button>
+        {/if}
       </div>
-      <!-- What follows describes CLAVIX'S OWN launch environment, which is
-           frozen at process start. It says nothing about the shell where
-           the user actually runs `ssh` — a correctly configured session
-           still reads as a mismatch here whenever Clavix was started
-           before the variable was in place. So the non-matching cases are
-           worded as "can't tell from here" and point at the one check
-           that is authoritative, rather than asserting a problem. -->
-      {#if sshAuthSockEnv === sshAgent.socketPath}
-        <p class="ssh-agent-env-ok">✓ {m.ssh_agent_env_ok()}</p>
-      {:else}
-        <p class="ssh-agent-env-unknown">
-          {sshAuthSockEnv
-            ? m.ssh_agent_env_other({ current: sshAuthSockEnv })
-            : m.ssh_agent_env_unset()}
-        </p>
+      {#if IS_WINDOWS}
+        <!-- No SSH_AUTH_SOCK exists on Windows: ssh.exe / ssh-add probe
+             the openssh-ssh-agent pipe automatically. Point at the same
+             authoritative check instead of the env-var story. -->
+        <p class="ssh-agent-env-ok">✓ {m.ssh_agent_env_windows_hint()}</p>
         <div class="ssh-agent-env-check">
-          <p class="hint">{m.ssh_agent_env_verify_hint()}</p>
           <div class="ssh-agent-sock">
             <code>ssh-add -l</code>
             <button
@@ -476,6 +473,36 @@
             </button>
           </div>
         </div>
+      {:else}
+        <!-- What follows describes CLAVIX'S OWN launch environment, which is
+             frozen at process start. It says nothing about the shell where
+             the user actually runs `ssh` — a correctly configured session
+             still reads as a mismatch here whenever Clavix was started
+             before the variable was in place. So the non-matching cases are
+             worded as "can't tell from here" and point at the one check
+             that is authoritative, rather than asserting a problem. -->
+        {#if sshAuthSockEnv === sshAgent.socketPath}
+          <p class="ssh-agent-env-ok">✓ {m.ssh_agent_env_ok()}</p>
+        {:else}
+          <p class="ssh-agent-env-unknown">
+            {sshAuthSockEnv
+              ? m.ssh_agent_env_other({ current: sshAuthSockEnv })
+              : m.ssh_agent_env_unset()}
+          </p>
+          <div class="ssh-agent-env-check">
+            <p class="hint">{m.ssh_agent_env_verify_hint()}</p>
+            <div class="ssh-agent-sock">
+              <code>ssh-add -l</code>
+              <button
+                type="button"
+                class="secondary small"
+                onclick={() => onCopyShellCommand("ssh-add -l")}
+              >
+                {m.action_copy()}
+              </button>
+            </div>
+          </div>
+        {/if}
       {/if}
     {/if}
     {#if sshAgent.running && sshAgent.keys.length > 0}
