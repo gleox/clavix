@@ -113,6 +113,29 @@ updates:
     # 7→9 alone). When we choose to upgrade the whole family, lift this
     # entry and let the `wdio` group below batch the bump.
     #
+    # `@wdio/mocha-framework` is pinned EXACTLY in package.json (no
+    # caret), which is deliberate and must survive future edits.
+    # 9.31.6 declares `mocha: ^10.3.0`; 9.31.7 declares `mocha: ^11.8.0`
+    # — a patch release that crosses a major. Taking 9.31.7 pulls mocha
+    # 11.8.0, which brings `diff@7.0.0`, inside the vulnerable range of
+    # GHSA-73rr-hh4g-fpgx (jsdiff DoS, >=6.0.0 <8.0.3). We resolve
+    # `diff@5.2.2`, below the range, so the bump would *introduce* an
+    # advisory and red the `pnpm audit (full tree)` gate.
+    #
+    # A caret cannot express that constraint — `^9.31.2` and `^9.31.6`
+    # both admit 9.31.7 — so only the lockfile was holding mocha at 10,
+    # and any fresh resolution (rebase, batch, bare `pnpm install`)
+    # would silently take it. The exact pin makes the spec say what the
+    # lockfile does. Dependabot will keep proposing bumps past it, which
+    # is the point: each one becomes a deliberate decision.
+    #
+    # Lift the pin when mocha 10 -> 11 is done properly in its own PR,
+    # with the E2E suite exercised against it — including a deliberately
+    # failing test, since the assertion diff is the only code path
+    # jsdiff is on, so a green run proves nothing. A scoped
+    # `diff@>=6.0.0 <8.0.3: ^8.0.3` floor then clears the advisory.
+    # Past blocked attempts: PR #302, PR #309.
+    #
     # `@tauri-apps/*` is mirrored to the cargo `tauri*` ignore — see
     # the comment on that block. The two ecosystems must move
     # together, so we manage Tauri bumps by hand. Past blocked
