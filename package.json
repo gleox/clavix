@@ -33,17 +33,17 @@
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.11.4",
     "@testing-library/svelte": "^5.4.2",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.4.1",
     "@wdio/cli": "^9.31.4",
     "@wdio/local-runner": "^9.31.4",
     "@wdio/mocha-framework": "^9.31.2",
     "@wdio/spec-reporter": "^9.31.2",
     "jsdom": "^30.0.1",
     "jsqr": "^1.4.0",
-    "svelte": "^5.56.10",
+    "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "typescript": "~5.6.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   }
 }
