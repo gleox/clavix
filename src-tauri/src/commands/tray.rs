@@ -292,13 +292,7 @@ fn lock_session(app: &AppHandle) {
     // calling the Tauri command directly because we hold an
     // `AppHandle`, not the `State<'_, AppState>` shape Tauri's
     // dispatcher would hand us — and we don't need a return value.
-    let agent = {
-        let mut slot = state.ssh_agent.lock();
-        slot.take()
-    };
-    if let Some(handle) = agent {
-        handle.stop_sync();
-    }
+    crate::commands::ssh::stop_agent_sync(&state);
     {
         let mut guard = state.session.lock();
         *guard = None;

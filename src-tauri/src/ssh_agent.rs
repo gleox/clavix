@@ -927,6 +927,22 @@ mod windows {
     use super::proto::{serve, AgentKey, CallerInfo, KeyInfo, KeyStore, SignGuard};
     use clavix_core::error::{Error, Result};
 
+    /// How many accepts in a row may fail before the endpoint gives up.
+    /// A single failure says nothing — a client can die between connect
+    /// and handshake — but a run of them means the pipe itself is gone,
+    /// and spinning on it forever would burn a core.
+    const MAX_CONSECUTIVE_ACCEPT_ERRORS: u32 = 5;
+
+    /// A stop still in flight looks exactly like a competing agent: the
+    /// previous instance's handles are released by a background runtime
+    /// shutdown, so they can outlive the call that replaces them by a few
+    /// milliseconds. `start_agent` runs right after a stop whenever the
+    /// confirmation policy changes, and blaming the Windows OpenSSH
+    /// service for our own not-yet-closed handles would send the user
+    /// looking in the wrong place. Retry quietly for up to a second first.
+    const FIRST_INSTANCE_RETRIES: u32 = 20;
+    const FIRST_INSTANCE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
     /// Test-only switch: create our own Pageant window even when an
     /// incumbent "Pageant" window exists. Production always yields to the
     /// incumbent (see `pageant::spawn_if_free`), but tests must be able to
@@ -1523,6 +1539,48 @@ mod windows {
             (CopySid(len, copy.as_mut_ptr() as *mut c_void, sid) != 0).then_some(copy)
         }
 
+        /// Owner SID of `handle`, copied out of OS-owned memory.
+        ///
+        /// `ppSecurityDescriptor` is not optional, however tempting it is
+        /// to pass NULL when the owner is all we want: `GetSecurityInfo`
+        /// allocates a self-relative descriptor on every successful call
+        /// and the SID it returns points *into* that allocation — which is
+        /// exactly why the SID has to be copied out at all. Passing NULL
+        /// does not skip the allocation, it only throws away the one
+        /// pointer that could free it, once per Pageant request. MSDN
+        /// documents the argument as required whenever any of the
+        /// `ppsid*` / `ppDacl` / `ppSacl` outputs is non-NULL.
+        unsafe fn owner_sid_of(handle: HANDLE) -> Option<Vec<u8>> {
+            use windows_sys::Win32::Foundation::LocalFree;
+            use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+            use windows_sys::Win32::Security::{
+                OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            };
+
+            let mut owner: PSID = std::ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            let rc = GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            );
+            if rc != 0 {
+                return None;
+            }
+            // Copy first, free second: `owner` dangles the moment the
+            // descriptor is released.
+            let copied = copy_sid(owner);
+            if !sd.is_null() {
+                LocalFree(sd);
+            }
+            copied
+        }
+
         /// The SID this process's token uses as the *default owner* for
         /// objects created without an explicit security descriptor: the
         /// Administrators group for an elevated token, the user otherwise.
@@ -1532,8 +1590,6 @@ mod windows {
         /// pair) — clients that pass no descriptor at all, and clients on
         /// an elevated token, produce exactly this owner.
         fn current_default_owner_sid() -> Option<Vec<u8>> {
-            use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
-            use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSID};
             use windows_sys::Win32::System::Threading::{
                 GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
             };
@@ -1559,18 +1615,7 @@ mod windows {
                 if proc.is_null() {
                     return None;
                 }
-                let mut sid: PSID = std::ptr::null_mut();
-                let rc = GetSecurityInfo(
-                    proc,
-                    SE_KERNEL_OBJECT,
-                    OWNER_SECURITY_INFORMATION,
-                    &mut sid,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                let result = if rc == 0 { copy_sid(sid) } else { None };
+                let result = owner_sid_of(proc);
                 CloseHandle(proc);
                 result
             }?;
@@ -1582,8 +1627,7 @@ mod windows {
         /// token's default owner) — PuTTY's pageant check against a
         /// different user borrowing the agent's keys.
         fn mapping_belongs_to_current_user(map: HANDLE) -> bool {
-            use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
-            use windows_sys::Win32::Security::{EqualSid, OWNER_SECURITY_INFORMATION, PSID};
+            use windows_sys::Win32::Security::{EqualSid, PSID};
 
             // Two acceptable owners, exactly like PuTTY's pageant: the
             // user's own SID (clients that set an explicit security
@@ -1594,24 +1638,10 @@ mod windows {
             else {
                 return false; // fail closed
             };
+            let Some(owned) = (unsafe { owner_sid_of(map) }) else {
+                return false;
+            };
             unsafe {
-                let mut owner: PSID = std::ptr::null_mut();
-                let rc = GetSecurityInfo(
-                    map,
-                    SE_KERNEL_OBJECT,
-                    OWNER_SECURITY_INFORMATION,
-                    &mut owner,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                if rc != 0 {
-                    return false;
-                }
-                let Some(owned) = copy_sid(owner) else {
-                    return false;
-                };
                 EqualSid(ours.as_ptr() as PSID, owned.as_ptr() as PSID) != 0
                     || EqualSid(default_owner.as_ptr() as PSID, owned.as_ptr() as PSID) != 0
             }
@@ -1633,7 +1663,8 @@ mod windows {
         /// able to synchronously wait on confirmations without depending on
         /// how the host app's runtime is threaded.
         rt: Runtime,
-        accept_loop: JoinHandle<()>,
+        /// `None` only after a stop has taken it; see `SshAgentHandle::stop`.
+        accept_loop: Option<JoinHandle<()>>,
         pageant: Option<pageant::PageantThread>,
         /// Denies parked confirmations on stop - a Pageant request can be
         /// sitting in the window thread's `block_on`, and joining it must
@@ -1642,7 +1673,17 @@ mod windows {
     }
 
     impl SshAgentHandle {
-        pub async fn stop(self) {
+        pub async fn stop(mut self) {
+            // Abort *and wait*: the aborted task owns the listening pipe
+            // instance, and the next `start_agent` — which is what a
+            // confirmation-policy change does — asks the OS for a *first*
+            // instance, a request that fails for as long as ours is open.
+            // Only the async path can wait; `start_agent` retries for the
+            // benefit of the sync one.
+            if let Some(loop_task) = self.shared.accept_loop.take() {
+                loop_task.abort();
+                let _ = loop_task.await;
+            }
             self.shutdown();
         }
 
@@ -1654,13 +1695,15 @@ mod windows {
 
         fn shutdown(mut self) {
             self.shared.guard.cancel();
-            self.shared.accept_loop.abort();
+            if let Some(loop_task) = self.shared.accept_loop.take() {
+                loop_task.abort();
+            }
             // Quit the Pageant window thread, then wait for it: it can be
             // parked on a signature confirmation (bounded by the 30 s
             // confirm timeout), and the runtime must outlive any `block_on`
-            // still driving it. Callers that hold pending confirmations
-            // should deny them first (`commands::ssh` drains `ssh_confirms`)
-            // so the stop is not delayed by a prompt nobody can see.
+            // still driving it. `guard.cancel()` above is what keeps that
+            // join short; `commands::ssh::stop_agent_sync` separately
+            // closes the dialog the confirmation belongs to.
             if let Some(pg) = self.shared.pageant.as_ref() {
                 pg.request_quit();
             }
@@ -1795,11 +1838,26 @@ mod windows {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let name = pipe_name.clone();
             rt.spawn(async move {
-                let result = ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .access_inbound(true)
-                    .access_outbound(true)
-                    .create(&name);
+                let mut attempt = 0u32;
+                let result = loop {
+                    let result = ServerOptions::new()
+                        .first_pipe_instance(true)
+                        .access_inbound(true)
+                        .access_outbound(true)
+                        .create(&name);
+                    // tokio maps ERROR_ACCESS_DENIED — both a competing
+                    // agent and our own previous instance still closing —
+                    // to PermissionDenied. Only the second one clears up
+                    // on its own, so retry before believing it.
+                    let retryable = matches!(&result, Err(e)
+                        if e.kind() == std::io::ErrorKind::PermissionDenied)
+                        && attempt < FIRST_INSTANCE_RETRIES;
+                    if !retryable {
+                        break result;
+                    }
+                    attempt += 1;
+                    tokio::time::sleep(FIRST_INSTANCE_RETRY_DELAY).await;
+                };
                 let _ = tx.send(result);
             });
             match rx.await {
@@ -1836,20 +1894,53 @@ mod windows {
             let rt_handle = rt.handle().clone();
             let pipe_name_loop = pipe_name.clone();
             rt.spawn(async move {
-                // One listening instance at a time, replenished as soon as
-                // a client connects; accepted connections are then served
-                // concurrently by their own tasks. This is the same accept
-                // shape PuTTY Pageant and KeePassXC use — Windows OpenSSH
-                // clients connect per request and don't expect a pool.
-                let mut listening = Some(first);
+                // One instance listening at a time; accepted connections
+                // are served concurrently by their own tasks. Windows
+                // OpenSSH clients connect once per request and don't
+                // expect a pool.
+                let mut listening = first;
+                let mut consecutive_errors = 0u32;
                 loop {
-                    let Some(server) = listening.take() else {
-                        break;
+                    let accepted = listening.connect().await;
+
+                    // Replenish before the accepted connection is handed
+                    // off, and whatever the accept returned. A client that
+                    // opens the pipe while no instance is listening is
+                    // told it is busy rather than queued, so the ordering
+                    // keeps that window as short as it can be — and, more
+                    // to the point, keeps it independent of whatever else
+                    // ends up between the accept and the hand-off later.
+                    // No first-instance flag here: ours is already in.
+                    let next = match ServerOptions::new()
+                        .access_inbound(true)
+                        .access_outbound(true)
+                        .create(&pipe_name_loop)
+                    {
+                        Ok(next) => next,
+                        Err(e) => {
+                            eprintln!(
+                                "[clavix agent] cannot recreate a listening instance on \
+                                 {pipe_name_loop}, the endpoint stops here: {e}"
+                            );
+                            return;
+                        }
                     };
-                    if let Err(e) = server.connect().await {
+                    let server = std::mem::replace(&mut listening, next);
+
+                    if let Err(e) = accepted {
                         eprintln!("[clavix agent] pipe connect failed on {pipe_name_loop}: {e}");
-                        break;
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                            eprintln!(
+                                "[clavix agent] {consecutive_errors} accepts in a row failed on \
+                                 {pipe_name_loop}, the endpoint stops here"
+                            );
+                            return;
+                        }
+                        continue;
                     }
+                    consecutive_errors = 0;
+
                     let store = store_loop.clone();
                     let guard = guard_loop.clone();
                     rt_handle.spawn(async move {
@@ -1860,15 +1951,6 @@ mod windows {
                             eprintln!("[clavix agent] connection error: {e}");
                         }
                     });
-                    // Create the next listening instance for the following
-                    // client (no first-instance flag: ours is already in).
-                    match ServerOptions::new().create(&pipe_name_loop) {
-                        Ok(next) => listening = Some(next),
-                        Err(e) => {
-                            eprintln!("[clavix agent] cannot recreate pipe instance: {e}");
-                            break;
-                        }
-                    }
                 }
             })
         };
@@ -1885,7 +1967,7 @@ mod windows {
             keys: key_summaries,
             shared: AgentShared {
                 rt,
-                accept_loop,
+                accept_loop: Some(accept_loop),
                 pageant: pageant_thread,
                 guard,
             },
@@ -2213,6 +2295,55 @@ mod windows {
                 other => panic!("expected Storage error, got {other:?}"),
             }
             drop(blocker);
+        }
+
+        /// A stop hands the agent's runtime to `shutdown_background()`, so
+        /// the instance it was listening on can still be open when the
+        /// next start asks the OS for a *first* instance. Changing the
+        /// confirmation policy does exactly this — stop, then start again
+        /// on the same name — and the OS's ACCESS_DENIED used to surface
+        /// as "is the Windows OpenSSH ssh-agent service running?", with no
+        /// agent left behind to contradict it.
+        #[test]
+        fn restarting_immediately_after_a_stop_succeeds() {
+            let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            use tokio::io::AsyncWriteExt as _;
+
+            let name = unique_pipe("restart");
+            let rt = tokio::runtime::Runtime::new().unwrap();
+
+            rt.block_on(async {
+                let mut handle = start_agent(
+                    PathBuf::from(&name),
+                    vec![make_key("restart")],
+                    SignGuard::new(SignPolicy::Never, None),
+                )
+                .await
+                .unwrap();
+
+                // Three in a row: one restart could get lucky on timing.
+                for _ in 0..3 {
+                    handle.stop().await;
+                    handle = start_agent(
+                        PathBuf::from(&name),
+                        vec![make_key("restart")],
+                        SignGuard::new(SignPolicy::Never, None),
+                    )
+                    .await
+                    .expect("a restart must not be taken for a competing agent");
+                }
+
+                // ...and the endpoint the last start returned actually
+                // serves, rather than merely having been created.
+                let mut client = tokio::net::windows::named_pipe::ClientOptions::new()
+                    .open(&name)
+                    .unwrap();
+                client.write_all(&frame(&[11])).await.unwrap();
+                let resp = read_frame(&mut client).await;
+                assert_eq!(resp[0], 12); // SSH_AGENT_IDENTITIES_ANSWER
+
+                handle.stop().await;
+            });
         }
 
         /// Full PuTTY-client emulation against our own Pageant window:
