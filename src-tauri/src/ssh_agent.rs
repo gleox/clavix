@@ -225,7 +225,10 @@ mod proto {
     /// Reduce an OS-supplied process label (Linux `/proc/<pid>/comm`, a
     /// Windows image file name) to a short, printable, single-line string:
     /// it is headed for a confirmation dialog and the process itself
-    /// controls parts of it. Shared by both platforms' `process_name`.
+    /// controls parts of it. Shared by both platforms' `process_name` —
+    /// and compiled only where one of those callers exists (macOS resolves
+    /// no label at all, so an unconditional copy here would be dead code).
+    #[cfg(any(target_os = "linux", windows))]
     pub fn sanitize_process_label(raw: &str) -> Option<String> {
         let cleaned: String = raw
             .chars()
