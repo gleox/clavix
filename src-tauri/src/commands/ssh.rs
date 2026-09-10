@@ -169,10 +169,11 @@ pub struct SshAgentStatus {
 }
 
 /// Deny every pending signature confirmation: send `false` down each
-/// parked oneshot. Call before stopping the agent so a confirmation the
-/// user can no longer see (the prompt is gone, the dialog is closing)
-/// does not keep a serve task — or the Pageant window thread — parked
-/// for the full 30-second confirm timeout.
+/// parked oneshot. The agent itself already cancels parked authorizations
+/// when it stops (`SignGuard::cancel`), so this is not what makes the
+/// stop prompt — it is what closes the *UI side* of a prompt that is
+/// about to become unreachable, instead of leaving the dialog waiting
+/// for its own timeout.
 fn deny_pending_confirmations(state: &AppState) {
     let pending = std::mem::take(&mut *state.ssh_confirms.lock());
     for (_, tx) in pending {

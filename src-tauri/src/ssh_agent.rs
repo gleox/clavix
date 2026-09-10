@@ -138,6 +138,13 @@ mod proto {
         confirm: Option<ConfirmFn>,
         /// Fingerprints approved during this agent run (PerSession only).
         approved: Arc<Mutex<HashSet<String>>>,
+        /// Set when the agent starts stopping: every parked authorization
+        /// resolves to "denied" immediately instead of waiting out the
+        /// confirmation timeout. This is what keeps `stop()` from ever
+        /// blocking on a prompt the user can no longer see — it must not
+        /// depend on the *caller* remembering to clear the prompts first.
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        cancel_notify: Arc<tokio::sync::Notify>,
     }
 
     impl SignGuard {
@@ -146,7 +153,17 @@ mod proto {
                 policy,
                 confirm,
                 approved: Arc::new(Mutex::new(HashSet::new())),
+                cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cancel_notify: Arc::new(tokio::sync::Notify::new()),
             }
+        }
+
+        /// Deny every parked (and every later) authorization. Idempotent;
+        /// called by the agent's stop paths.
+        pub fn cancel(&self) {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.cancel_notify.notify_waiters();
         }
 
         /// Decide whether a signature with `key` may proceed. Awaits the
@@ -175,19 +192,49 @@ mod proto {
         }
 
         async fn ask(&self, key: &KeyInfo, caller: Option<&CallerInfo>) -> bool {
+            use std::sync::atomic::Ordering;
+
             // A confirming policy with no callback wired can't be
             // satisfied — deny rather than silently sign.
-            match &self.confirm {
-                Some(confirm) => {
-                    confirm(SignRequest {
-                        key: key.clone(),
-                        caller: caller.cloned(),
-                    })
-                    .await
-                }
-                None => false,
+            let Some(confirm) = &self.confirm else {
+                return false;
+            };
+            if self.cancelled.load(Ordering::SeqCst) {
+                return false;
+            }
+            let answer = confirm(SignRequest {
+                key: key.clone(),
+                caller: caller.cloned(),
+            });
+            // Register the cancellation waiter *before* the second flag
+            // check (`enable` closes the create-vs-notify race), so a
+            // `cancel()` landing between the two loads still wins.
+            let notified = self.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled.load(Ordering::SeqCst) {
+                return false;
+            }
+            tokio::select! {
+                approved = answer => approved,
+                _ = notified => false,
             }
         }
+    }
+
+    /// Reduce an OS-supplied process label (Linux `/proc/<pid>/comm`, a
+    /// Windows image file name) to a short, printable, single-line string:
+    /// it is headed for a confirmation dialog and the process itself
+    /// controls parts of it. Shared by both platforms' `process_name`.
+    pub fn sanitize_process_label(raw: &str) -> Option<String> {
+        let cleaned: String = raw
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(32)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        (!cleaned.is_empty()).then_some(cleaned)
     }
 
     /// Parse an OpenSSH private key and wrap it as an `AgentKey` if we can
@@ -679,10 +726,14 @@ mod unix {
         task: JoinHandle<()>,
         #[allow(dead_code)]
         key_store: KeyStore,
+        /// Used to deny parked confirmations on stop, so stopping never
+        /// waits on a prompt nobody can answer.
+        guard: SignGuard,
     }
 
     impl SshAgentHandle {
         pub async fn stop(self) {
+            self.guard.cancel();
             self.task.abort();
             let _ = tokio::fs::remove_file(&self.socket_path).await;
         }
@@ -690,6 +741,7 @@ mod unix {
         /// Non-async best-effort stop, suitable for `lock` / `logout` commands
         /// that don't want to be async just for this cleanup.
         pub fn stop_sync(self) {
+            self.guard.cancel();
             self.task.abort();
             let _ = std::fs::remove_file(&self.socket_path);
         }
@@ -739,20 +791,8 @@ mod unix {
         #[cfg(target_os = "linux")]
         {
             let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-            let name = comm.trim();
-            if name.is_empty() {
-                return None;
-            }
             // `comm` is attacker-controlled text heading for a dialog.
-            // Keep it to a short, printable, single-line label.
-            let cleaned: String = name
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(32)
-                .collect::<String>()
-                .trim()
-                .to_string();
-            (!cleaned.is_empty()).then_some(cleaned)
+            super::proto::sanitize_process_label(comm.trim())
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -780,6 +820,7 @@ mod unix {
         let store: KeyStore = Arc::new(tokio::sync::Mutex::new(keys));
         let store_task = store.clone();
         let path_for_task = socket_path.clone();
+        let guard_for_handle = guard.clone();
 
         let task = tokio::spawn(async move {
             loop {
@@ -813,6 +854,7 @@ mod unix {
             keys: key_summaries,
             task,
             key_store: store,
+            guard: guard_for_handle,
         })
     }
 
@@ -1415,51 +1457,52 @@ mod windows {
                 GetTokenInformation, TokenUser, SID_AND_ATTRIBUTES,
             };
 
-            static CACHE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-            CACHE
-                .get_or_init(|| unsafe {
-                    let mut token = std::ptr::null_mut();
-                    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-                        return None;
-                    }
-                    let result = (|| {
-                        // First call sizes the buffer (fails with
-                        // ERROR_INSUFFICIENT_BUFFER by design).
-                        let mut needed = 0u32;
-                        let rc = GetTokenInformation(
-                            token,
-                            TokenUser,
-                            std::ptr::null_mut(),
-                            0,
-                            &mut needed,
-                        );
-                        if rc == 0 {
-                            let err = GetLastError();
-                            if err != ERROR_INSUFFICIENT_BUFFER || needed == 0 {
-                                return None;
-                            }
-                        }
-                        let mut buf = vec![0u8; needed as usize];
-                        if GetTokenInformation(
-                            token,
-                            TokenUser,
-                            buf.as_mut_ptr() as *mut c_void,
-                            needed,
-                            &mut needed,
-                        ) == 0
-                        {
+            // Successful lookups only: caching a failure would disable
+            // the Pageant endpoint for the rest of the run after one
+            // transient error.
+            static CACHE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+            if let Some(sid) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Some(sid);
+            }
+            let computed = unsafe {
+                let mut token = std::ptr::null_mut();
+                if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                    return None;
+                }
+                let result = (|| {
+                    // First call sizes the buffer (fails with
+                    // ERROR_INSUFFICIENT_BUFFER by design).
+                    let mut needed = 0u32;
+                    let rc =
+                        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+                    if rc == 0 {
+                        let err = GetLastError();
+                        if err != ERROR_INSUFFICIENT_BUFFER || needed == 0 {
                             return None;
                         }
-                        // TOKEN_USER begins with a SID_AND_ATTRIBUTES whose
-                        // Sid points *into* the buffer; copy the SID out so
-                        // the pointer cannot dangle.
-                        let attrs = buf.as_ptr() as *const SID_AND_ATTRIBUTES;
-                        copy_sid((*attrs).Sid)
-                    })();
-                    CloseHandle(token);
-                    result
-                })
-                .clone()
+                    }
+                    let mut buf = vec![0u8; needed as usize];
+                    if GetTokenInformation(
+                        token,
+                        TokenUser,
+                        buf.as_mut_ptr() as *mut c_void,
+                        needed,
+                        &mut needed,
+                    ) == 0
+                    {
+                        return None;
+                    }
+                    // TOKEN_USER begins with a SID_AND_ATTRIBUTES whose
+                    // Sid points *into* the buffer; copy the SID out so
+                    // the pointer cannot dangle.
+                    let attrs = buf.as_ptr() as *const SID_AND_ATTRIBUTES;
+                    copy_sid((*attrs).Sid)
+                })();
+                CloseHandle(token);
+                result
+            }?;
+            *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(computed.clone());
+            Some(computed)
         }
 
         /// Copy a SID out of OS-owned memory into a plain byte buffer.
@@ -1497,35 +1540,39 @@ mod windows {
             /// the access mask itself is generic.)
             const READ_CONTROL: u32 = 0x0002_0000;
 
-            static CACHE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-            CACHE
-                .get_or_init(|| unsafe {
-                    // PuTTY asks for MAXIMUM_ALLOWED, which includes
-                    // READ_CONTROL.
-                    let proc = OpenProcess(
-                        PROCESS_QUERY_LIMITED_INFORMATION | READ_CONTROL,
-                        0,
-                        GetCurrentProcessId(),
-                    );
-                    if proc.is_null() {
-                        return None;
-                    }
-                    let mut sid: PSID = std::ptr::null_mut();
-                    let rc = GetSecurityInfo(
-                        proc,
-                        SE_KERNEL_OBJECT,
-                        OWNER_SECURITY_INFORMATION,
-                        &mut sid,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
-                    let result = if rc == 0 { copy_sid(sid) } else { None };
-                    CloseHandle(proc);
-                    result
-                })
-                .clone()
+            // Successful lookups only, as in `current_user_sid`.
+            static CACHE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+            if let Some(sid) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Some(sid);
+            }
+            let computed = unsafe {
+                // PuTTY asks for MAXIMUM_ALLOWED, which includes
+                // READ_CONTROL.
+                let proc = OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | READ_CONTROL,
+                    0,
+                    GetCurrentProcessId(),
+                );
+                if proc.is_null() {
+                    return None;
+                }
+                let mut sid: PSID = std::ptr::null_mut();
+                let rc = GetSecurityInfo(
+                    proc,
+                    SE_KERNEL_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    &mut sid,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                let result = if rc == 0 { copy_sid(sid) } else { None };
+                CloseHandle(proc);
+                result
+            }?;
+            *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(computed.clone());
+            Some(computed)
         }
 
         /// True when the request mapping's owner is this user (or this
@@ -1585,6 +1632,10 @@ mod windows {
         rt: Runtime,
         accept_loop: JoinHandle<()>,
         pageant: Option<pageant::PageantThread>,
+        /// Denies parked confirmations on stop - a Pageant request can be
+        /// sitting in the window thread's `block_on`, and joining it must
+        /// not wait out the confirmation timeout.
+        guard: SignGuard,
     }
 
     impl SshAgentHandle {
@@ -1599,6 +1650,7 @@ mod windows {
         }
 
         fn shutdown(mut self) {
+            self.shared.guard.cancel();
             self.shared.accept_loop.abort();
             // Quit the Pageant window thread, then wait for it: it can be
             // parked on a signature confirmation (bounded by the 30 s
@@ -1691,11 +1743,9 @@ mod windows {
                 break;
             }
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            if err == windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER {
-                len = len.saturating_mul(2).min(64 * 1024);
-                if len < 64 * 1024 {
-                    continue;
-                }
+            if err == windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER && len < 64 * 1024 {
+                len = (len.saturating_mul(2)).min(64 * 1024);
+                continue;
             }
             break;
         }
@@ -1707,14 +1757,7 @@ mod windows {
         // The image path is attacker-influenced text heading for a dialog:
         // keep just the file name, printable, short, single-line.
         let file = name.rsplit(['\\', '/']).next().unwrap_or(&name);
-        let cleaned: String = file
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(32)
-            .collect::<String>()
-            .trim()
-            .to_string();
-        (!cleaned.is_empty()).then_some(cleaned)
+        super::proto::sanitize_process_label(file)
     }
 
     pub async fn start_agent(
@@ -1841,6 +1884,7 @@ mod windows {
                 rt,
                 accept_loop,
                 pageant: pageant_thread,
+                guard,
             },
         })
     }
@@ -1987,6 +2031,118 @@ mod windows {
                 assert_eq!(inner.read_string().unwrap().len(), 64);
 
                 handle.stop().await;
+            });
+        }
+
+        /// A stop must never wait on a parked confirmation: a Pageant
+        /// request under the "always ask" policy whose prompt never answers
+        /// has the window thread parked in `block_on`, and `stop()` itself
+        /// must deny it — not leave the caller waiting on a timeout.
+        #[test]
+        fn stopping_denies_a_parked_pageant_confirmation() {
+            let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+            use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
+            use windows_sys::Win32::System::Memory::{
+                CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_WRITE, PAGE_READWRITE,
+            };
+            use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COPYDATA};
+
+            let key = make_key("cancel-test");
+            let blob = key.pub_blob.clone();
+            let name = unique_pipe("cancel");
+
+            // The prompt never answers; cancellation is what ends the wait.
+            // The channel tells the test the request is parked inside the
+            // agent before it calls stop.
+            let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
+            let confirm: super::super::proto::ConfirmFn = Arc::new(move |_req| {
+                let _ = parked_tx.send(());
+                Box::pin(std::future::pending::<bool>())
+            });
+            let guard = SignGuard::new(SignPolicy::Always, Some(confirm));
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                super::TEST_FORCE_PAGEANT.store(true, std::sync::atomic::Ordering::Relaxed);
+                let handle = start_agent(PathBuf::from(&name), vec![key], guard)
+                    .await
+                    .unwrap();
+                super::TEST_FORCE_PAGEANT.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                let hwnd = unsafe { find_own_pageant_window() };
+                assert!(
+                    !hwnd.is_null(),
+                    "start_agent should create a Pageant window"
+                );
+
+                // The client blocks in SendMessage until the agent answers.
+                let hwnd_addr = hwnd as isize;
+                let blob_for_thread = blob.clone();
+                let client = std::thread::spawn(move || unsafe {
+                    let map_name = format!("PageantRequest{:08x}", GetCurrentThreadId());
+                    let mut name_wide: Vec<u16> = map_name.encode_utf16().collect();
+                    name_wide.push(0);
+                    let mut name_bytes = map_name.into_bytes();
+                    name_bytes.push(0);
+
+                    let hmap = CreateFileMappingW(
+                        INVALID_HANDLE_VALUE,
+                        std::ptr::null(),
+                        PAGE_READWRITE,
+                        0,
+                        256 * 1024,
+                        name_wide.as_ptr(),
+                    );
+                    assert!(!hmap.is_null(), "client mapping");
+                    let view = MapViewOfFile(hmap, FILE_MAP_WRITE, 0, 0, 0);
+                    assert!(!view.Value.is_null(), "client view");
+                    let bytes = std::slice::from_raw_parts_mut(view.Value as *mut u8, 256 * 1024);
+
+                    let mut req = vec![13u8]; // SSH_AGENTC_SIGN_REQUEST
+                    super::super::proto::write_string(&mut req, &blob_for_thread);
+                    super::super::proto::write_string(&mut req, b"cancel-test-data");
+                    req.extend_from_slice(&u32::to_be_bytes(0));
+                    let framed = frame(&req);
+                    bytes[..framed.len()].copy_from_slice(&framed);
+
+                    let cds = COPYDATASTRUCT {
+                        dwData: 0x804e50ba, // AGENT_COPYDATA_ID
+                        cbData: name_bytes.len() as u32,
+                        lpData: name_bytes.as_mut_ptr() as *mut std::ffi::c_void,
+                    };
+                    let result = SendMessageW(
+                        hwnd_addr as *mut std::ffi::c_void,
+                        WM_COPYDATA,
+                        0,
+                        (&cds as *const COPYDATASTRUCT) as isize,
+                    );
+                    let first = if result > 0 {
+                        let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+                        Some(bytes[4..4 + len][0])
+                    } else {
+                        None
+                    };
+                    UnmapViewOfFile(view);
+                    CloseHandle(hmap);
+                    first
+                });
+
+                parked_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("the agent should park on the confirmation");
+                let started = std::time::Instant::now();
+                handle.stop().await;
+                let elapsed = started.elapsed();
+                assert!(
+                    elapsed < std::time::Duration::from_secs(2),
+                    "stop must cancel a parked confirmation, took {elapsed:?}"
+                );
+                assert_eq!(
+                    client.join().expect("client thread"),
+                    Some(5), // SSH_AGENT_FAILURE: the parked request was denied
+                );
             });
         }
 
