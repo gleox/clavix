@@ -94,9 +94,11 @@ Against a real Vaultwarden instance, Clavix:
   *Group* on the fly (📥), and reads back its own encrypted backups —
   cards, identities and SSH keys included, which the CSV schema cannot
   carry;
-- embeds an **SSH agent** (Linux / macOS): exposes the Ed25519 and RSA
-  keys from your vault over a Unix socket so `ssh`, `git`, `scp`, … use
-  them without the private keys ever touching disk.
+- embeds an **SSH agent** on every platform: exposes the Ed25519 and RSA
+  keys from your vault so `ssh`, `git`, `scp`, … use them without the
+  private keys ever touching disk — over a Unix socket on Linux and
+  macOS, over the `openssh-ssh-agent` named pipe and PuTTY's Pageant
+  IPC on Windows.
 
 The master password never hits the server nor the disk: only derived
 values are exchanged (master password hash for authentication, master
@@ -107,6 +109,8 @@ destruction.
 ---
 
 ## Using the SSH agent persistently
+
+### Linux / macOS
 
 The agent listens on `$XDG_RUNTIME_DIR/clavix/agent.sock` — usually
 `/run/user/<uid>/clavix/agent.sock`. The *Infos* dialog shows the exact
@@ -139,6 +143,24 @@ export `ssh-add -l` reports "The agent has no identities" even when
 The socket lives under `/run`, so it disappears on reboot and is
 recreated when Clavix starts. A `Connection refused` on that path means
 Clavix isn't running, not that your config is wrong.
+
+### Windows
+
+Nothing to set up: there is no `SSH_AUTH_SOCK` story here, and no
+environment variable of any kind is involved. Unlocking the vault
+exposes the keys on the two endpoints Windows clients already look for:
+
+- `\\.\pipe\openssh-ssh-agent` — the named pipe `ssh.exe`, `ssh-add`
+  and Git for Windows probe on their own;
+- PuTTY's **Pageant** IPC, so `plink`, `pscp` and `putty` (`-agent`)
+  reach the same keys.
+
+`ssh-add -l` is the check that settles it, and the *Infos* dialog has a
+button to copy it. Only one agent can own the pipe: if the Windows
+OpenSSH `ssh-agent` service (or another compatible agent) already holds
+it, Clavix says so rather than starting half-working — stop that
+service, or use Pageant-side clients. A real Pageant already running is
+not a conflict; Clavix skips its own Pageant window and leaves it alone.
 
 ---
 
@@ -174,8 +196,6 @@ above, or [CHANGELOG.md](CHANGELOG.md) for what landed in each version.
 
 ### Planned
 
-- 🪟 **Windows SSH agent** via named pipes / Pageant compatibility
-  (today the SSH agent is Unix-only).
 - 🛂 **ECDSA / DSA** SSH keys in the agent.
 - 🌐 **Server-side error translation** (`data.message` from the
   Vaultwarden API is still returned as-is).
@@ -289,7 +309,8 @@ clavix/
 │       ├── session.rs      Binds AppState to the engine's session slots
 │       ├── state.rs        AppState (session, ssh agent handle,
 │       │                   tray flags, auto-lock timestamps)
-│       ├── ssh_agent.rs    Unix-socket SSH agent (Ed25519 + RSA)
+│       ├── ssh_agent.rs    SSH agent (Ed25519 + RSA): Unix socket,
+│       │                   Windows pipe + Pageant
 │       ├── webauthn.rs     CTAP2 / HID WebAuthn path for 2FA
 │       ├── yubikey_unlock.rs  hmac-secret unlock via a FIDO2 key
 │       ├── auto_lock.rs    Idle + screen-lock watchdog
