@@ -5,16 +5,6 @@ All notable changes to Clavix are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Features
-
-* **ssh-agent:** serve the Windows OpenSSH `openssh-ssh-agent` named pipe
-  and the PuTTY Pageant IPC, so `ssh.exe`, `ssh-add`, git and plink/pscp
-  can use the vault's SSH keys. Préférences shows Windows-specific
-  guidance instead of the Unix `SSH_AUTH_SOCK` story
-  ([#306](https://github.com/Upellift99/clavix/pull/306))
-
 ## [0.20.0](https://github.com/Upellift99/clavix/compare/v0.19.4...v0.20.0) (2026-09-09)
 
 
