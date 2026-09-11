@@ -168,6 +168,46 @@ pub struct SshAgentStatus {
     pub skipped: Vec<SkippedKey>,
 }
 
+/// Deny every pending signature confirmation: send `false` down each
+/// parked oneshot. The agent itself already cancels parked authorizations
+/// when it stops (`SignGuard::cancel`), so this is not what makes the
+/// stop prompt — it is what closes the *UI side* of a prompt that is
+/// about to become unreachable, instead of leaving the dialog waiting
+/// for its own timeout.
+fn deny_pending_confirmations(state: &AppState) {
+    let pending = std::mem::take(&mut *state.ssh_confirms.lock());
+    for (_, tx) in pending {
+        let _ = tx.send(false);
+    }
+}
+
+/// Take the running agent out of `state`, deny every pending confirmation
+/// and stop it.
+///
+/// Every synchronous teardown path — `auth::lock`, `auth::logout`,
+/// `tray::lock_session` — goes through this instead of taking the handle
+/// and calling `stop_sync()` on it directly. The agent cancels its own
+/// parked authorizations, so the waiting *client* is answered either way;
+/// the dialog on screen is not. A path that skips the drain leaves a
+/// prompt with inert buttons up for the rest of its 30 s timeout, over a
+/// session that is already locked.
+pub(crate) fn stop_agent_sync(state: &AppState) {
+    let handle = {
+        let mut slot = state.ssh_agent.lock();
+        slot.take()
+    };
+    // Unconditionally, before the stop: a prompt outliving the agent that
+    // raised it is exactly the state this exists to prevent, so it must
+    // not depend on the slot still holding a handle.
+    deny_pending_confirmations(state);
+    if let Some(h) = handle {
+        h.stop_sync();
+    }
+    // Same reasoning as `stop_ssh_agent`: the skip list describes a load
+    // that no longer has a running agent behind it.
+    state.ssh_skipped.lock().clear();
+}
+
 #[tauri::command]
 pub async fn start_ssh_agent(
     state: State<'_, AppState>,
@@ -180,6 +220,7 @@ pub async fn start_ssh_agent(
         slot.take()
     };
     if let Some(h) = previous {
+        deny_pending_confirmations(&state);
         h.stop().await;
     }
 
@@ -303,6 +344,7 @@ pub async fn stop_ssh_agent(state: State<'_, AppState>) -> Result<()> {
         slot.take()
     };
     if let Some(h) = handle {
+        deny_pending_confirmations(&state);
         h.stop().await;
     }
     // The skip list describes a load that no longer has a running agent
@@ -631,4 +673,35 @@ pub fn ssh_agent_status(state: State<'_, AppState>) -> Result<SshAgentStatus> {
 #[tauri::command]
 pub fn ssh_auth_sock() -> Option<String> {
     std::env::var("SSH_AUTH_SOCK").ok()
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+
+    /// `lock` / `logout` / the tray must not leave a confirmation dialog
+    /// behind. The agent answers its own parked clients when it stops, but
+    /// the prompt on screen is only closed by the oneshot behind it, and
+    /// nothing else will: the session it belongs to is gone, so the user
+    /// is left with a dialog whose buttons do nothing until it times out
+    /// 30 s later. Deliberately asserted with an empty agent slot — the
+    /// drain must not be conditional on a handle still being there.
+    #[test]
+    fn stop_agent_sync_denies_pending_confirmations() {
+        let state = AppState::default();
+        let (tx, mut rx) = oneshot::channel::<bool>();
+        state.ssh_confirms.lock().insert(1, tx);
+        state.ssh_skipped.lock().push(SkippedKey {
+            name: "some key".into(),
+            reason: "unsupported algorithm".into(),
+        });
+
+        stop_agent_sync(&state);
+
+        assert!(!rx
+            .try_recv()
+            .expect("the prompt must be answered, not dropped"));
+        assert!(state.ssh_confirms.lock().is_empty());
+        assert!(state.ssh_skipped.lock().is_empty());
+    }
 }

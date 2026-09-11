@@ -609,13 +609,7 @@ pub async fn screen_lock_available() -> bool {
 
 #[tauri::command]
 pub fn lock(state: State<'_, AppState>) -> Result<()> {
-    let agent = {
-        let mut slot = state.ssh_agent.lock();
-        slot.take()
-    };
-    if let Some(h) = agent {
-        h.stop_sync();
-    }
+    crate::commands::ssh::stop_agent_sync(&state);
     {
         let mut guard = state.session.lock();
         *guard = None;
@@ -629,13 +623,7 @@ pub fn lock(state: State<'_, AppState>) -> Result<()> {
 
 #[tauri::command]
 pub fn logout(state: State<'_, AppState>) -> Result<()> {
-    let agent = {
-        let mut slot = state.ssh_agent.lock();
-        slot.take()
-    };
-    if let Some(h) = agent {
-        h.stop_sync();
-    }
+    crate::commands::ssh::stop_agent_sync(&state);
     {
         let mut guard = state.session.lock();
         *guard = None;

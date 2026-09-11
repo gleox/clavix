@@ -90,9 +90,31 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Raw FFI only — the input-desktop query is three calls. `windows-sys`
-# rather than `windows` keeps us on the same crate Tauri already builds.
-windows-sys = { version = "0.61", features = ["Win32_System_StationsAndDesktops"] }
+# Raw FFI only. `windows-sys` rather than `windows` keeps us on the same
+# crate Tauri already builds. Feature list, one per consumer:
+#  - Win32_System_StationsAndDesktops: the input-desktop lock query
+#    (`screen_lock.rs`), three calls.
+#  - Win32_System_Pipes / Win32_System_Threading / Win32_System_LibraryLoader:
+#    the SSH agent's named-pipe caller identity — GetNamedPipeClientProcessId
+#    plus OpenProcess + QueryFullProcessImageNameW (and GetModuleHandleW for
+#    the Pageant window class registration).
+#  - Win32_UI_WindowsAndMessaging: the Pageant IPC window — registration,
+#    creation, the WM_COPYDATA message loop, FindWindowW conflict probe.
+#  - Win32_System_Memory: Pageant's shared-memory request channel
+#    (OpenFileMappingW / MapViewOfFile) and VirtualQuery for the view bound.
+#  - Win32_Security / Win32_Security_Authorization: the same cross-user
+#    owner-SID check PuTTY's Pageant performs on the request mapping.
+windows-sys = { version = "0.61", features = [
+  "Win32_System_StationsAndDesktops",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_DataExchange",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # CFDictionary/CFBoolean wrappers around the CGSession lookup.
