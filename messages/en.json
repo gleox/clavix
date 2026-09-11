@@ -98,6 +98,7 @@
   "editor_saving": "Saving…",
   "ssh_agent_title": "SSH agent",
   "ssh_agent_hint": "Expose the SSH keys (Ed25519 and RSA) from your vault over a Unix socket, like ssh-agent. To use it everywhere, add the line below to your ~/.profile and log back into your session.",
+  "ssh_agent_hint_windows": "Expose the SSH keys (Ed25519 and RSA) from your vault to ssh.exe, ssh-add, git and PuTTY, over the OpenSSH named pipe and the Pageant IPC. Nothing to configure: Windows clients find the agent on their own.",
   "ssh_agent_start": "Start",
   "ssh_agent_stop": "Stop",
   "ssh_agent_running": "Running — {count} key(s) exposed",

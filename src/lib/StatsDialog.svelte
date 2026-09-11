@@ -398,7 +398,9 @@
     </dl>
 
     <h3>{m.ssh_agent_title()}</h3>
-    <p class="hint ssh-agent-hint">{m.ssh_agent_hint()}</p>
+    <p class="hint ssh-agent-hint">
+      {IS_WINDOWS ? m.ssh_agent_hint_windows() : m.ssh_agent_hint()}
+    </p>
     <dl class="ssh-agent-confirm-setting">
       <dt>{m.settings_ssh_confirm()}</dt>
       <dd>
